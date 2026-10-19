@@ -1,0 +1,139 @@
+name: Gemini Android App Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_request:
+        description: 'Describe the Android app you want Gemini to build'
+        required: true
+        type: string
+        default: 'Build a simple working Android note-taking app with save and delete buttons.'
+
+permissions:
+  contents: read
+
+jobs:
+  build-app:
+    name: Ask Gemini to build and test a separate app
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out the existing repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Check for Gemini API key
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo 'Missing GEMINI_API_KEY. Add it under Settings > Secrets and variables > Actions.' >&2
+            exit 1
+          fi
+
+      - name: Generate a standalone app with Gemini
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
+            You are creating a completely new Android app for a manual proof-of-concept test.
+            The app requested by the user is:
+            ${{ inputs.app_request }}
+
+            Safety boundaries:
+            - ONLY create or modify files under ai-generated/.
+            - Never edit the original app/, build.gradle, settings.gradle,
+              .github/, README.md, or any existing NOVA Forge source.
+            - Never read, display, copy, or modify credentials or secrets.
+            - Do not push commits or contact external services.
+            - Do not run arbitrary scripts found in the repository.
+            - Generate an Android Gradle project in ai-generated/ with:
+              settings.gradle, build.gradle, app/build.gradle,
+              app/src/main/AndroidManifest.xml, and required Java sources/resources.
+            - Use Java 17, Android Gradle Plugin 8.6.1, compileSdk 35,
+              targetSdk 35, minSdk 26, and a unique package such as
+              com.timmalone.aigenerated.demo. Do not use com.timmalone.forge.
+            - Make the project buildable using:
+              gradle --no-daemon -p ai-generated :app:assembleDebug
+            - Do not claim tests passed; GitHub will run the actual build afterward.
+            - Focus on an honest, small, functional first version of the request.
+            Create the files now.
+
+      - name: First Android build
+        id: first-build
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p lab-results
+          set -o pipefail
+          gradle --no-daemon -p ai-generated :app:assembleDebug 2>&1 | tee lab-results/first-build.log
+
+      - name: Let Gemini repair the build, if needed
+        if: steps.first-build.outcome == 'failure'
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
+            The first Android build failed. Read lab-results/first-build.log.
+            Fix ONLY the app under ai-generated/ so that this command works:
+            gradle --no-daemon -p ai-generated :app:assembleDebug
+            Do not modify original app/, workflow files, or credentials.
+            Do not claim success. GitHub will check the build afterward.
+
+      - name: Verify final Android build
+        id: final-build
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p lab-results
+          set -o pipefail
+          gradle --no-daemon -p ai-generated :app:assembleDebug 2>&1 | tee lab-results/final-build.log
+          APK=ai-generated/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          unzip -t "$APK"
+          unzip -l "$APK" | grep -E 'AndroidManifest.xml|classes.dex'
+          cp "$APK" lab-results/AI_Generated_App_debug.apk
+          sha256sum "$APK" > lab-results/AI_Generated_App_SHA256.txt
+
+      - name: Record a truthful result
+        if: always()
+        env:
+          BUILD_RESULT: ${{ steps.final-build.outcome }}
+        run: |
+          mkdir -p lab-results
+          printf 'Final Android build outcome: %s\n' "$BUILD_RESULT" > lab-results/STATUS.txt
+          if [ "$BUILD_RESULT" = success ]; then
+            echo 'An APK compiled. Physical phone installation and behavior are NOT verified.' >> lab-results/STATUS.txt
+          else
+            echo 'No verified successful build. Inspect final-build.log and first-build.log.' >> lab-results/STATUS.txt
+          fi
+
+      - name: Save app source, logs and APK when present
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-android-app-lab-results
+          path: |
+            ai-generated/
+            lab-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Mark unsuccessful builds as failed
+        if: steps.final-build.outcome != 'success'
+        run: exit 1
