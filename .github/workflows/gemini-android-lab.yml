@@ -17,6 +17,8 @@ jobs:
     name: Ask Gemini to build and test a separate app
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      GEMINI_CLI_TRUST_WORKSPACE: 'true'
     steps:
       - name: Check out the existing repository
         uses: actions/checkout@v4
